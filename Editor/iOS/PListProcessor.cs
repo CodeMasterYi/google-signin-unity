@@ -2,7 +2,9 @@
 using UnityEngine;
 
 using UnityEditor;
+#if UNITY_IOS
 using UnityEditor.iOS.Xcode;
+#endif
 
 using UnityEditor.Build;
 using UnityEditor.Build.Reporting;
