@@ -3,14 +3,14 @@
   <!-- See https://github.com/googlesamples/unity-jar-resolver#usage for
     how to configure dependencies -->
   <androidPackages>
-    <androidPackage spec="androidx.credentials:credentials:1.2.2" />
-    <androidPackage spec="androidx.credentials:credentials-play-services-auth:1.2.2" />
-    <androidPackage spec="com.google.android.libraries.identity.googleid:googleid:1.1.0" />
-    <androidPackage spec="com.google.android.gms:play-services-auth:21.2.0" />
+    <androidPackage spec="androidx.credentials:credentials:1.5.0" />
+    <androidPackage spec="androidx.credentials:credentials-play-services-auth:1.5.0" />
+    <androidPackage spec="com.google.android.libraries.identity.googleid:googleid:1.1.1" />
+    <androidPackage spec="com.google.android.gms:play-services-auth:21.3.0" />
   </androidPackages>
 
   <!-- iOS Cocoapod dependencies can be specified by each iosPod element. -->
   <iosPods>
-    <iosPod name="GoogleSignIn" version="~> 7.1.0" bitcodeEnabled="false" />
+    <iosPod name="GoogleSignIn" version="~> 9.0.0" bitcodeEnabled="false" />
   </iosPods>
 </dependencies>

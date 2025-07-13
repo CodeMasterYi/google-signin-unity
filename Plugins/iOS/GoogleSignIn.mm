@@ -27,17 +27,26 @@
 
 // These values are in the Unity plugin code.  The iOS specific
 // codes are mapped to these.
-static const int kStatusCodeSuccessCached = -1;
-static const int kStatusCodeSuccess = 0;
-static const int kStatusCodeApiNotConnected = 1;
-static const int kStatusCodeCanceled = 2;
-static const int kStatusCodeInterrupted = 3;
-static const int kStatusCodeInvalidAccount = 4;
-static const int kStatusCodeTimeout = 5;
-static const int kStatusCodeDeveloperError = 6;
-static const int kStatusCodeInternalError = 7;
-static const int kStatusCodeNetworkError = 8;
-static const int kStatusCodeError = 9;
+static const int g_StatusCode_SUCCESS_CACHE = -1;
+static const int g_StatusCode_SUCCESS = 0;
+static const int g_StatusCode_SIGN_IN_REQUIRED = 4;
+static const int g_StatusCode_INVALID_ACCOUNT = 5;
+static const int g_StatusCode_RESOLUTION_REQUIRED = 6;
+static const int g_StatusCode_NETWORK_ERROR = 7;
+static const int g_StatusCode_INTERNAL_ERROR = 8;
+static const int g_StatusCode_SERVICE_INVALID = 9;
+static const int g_StatusCode_DEVELOPER_ERROR = 10;
+static const int g_StatusCode_LICENSE_CHECK_FAILED = 11;
+static const int g_StatusCode_ERROR = 13;
+static const int g_StatusCode_INTERRUPTED = 14;
+static const int g_StatusCode_TIMEOUT = 15;
+static const int g_StatusCode_CANCELED = 16;
+static const int g_StatusCode_API_NOT_CONNECTED = 17;
+static const int g_StatusCode_DEAD_CLIENT = 18;
+static const int g_StatusCode_REMOTE_EXCEPTION = 19;
+static const int g_StatusCode_CONNECTION_SUSPENDED_DURING_CALL = 20;
+static const int g_StatusCode_RECONNECTION_TIMED_OUT_DURING_UPDATE = 21;
+static const int g_StatusCode_RECONNECTION_TIMED_OUT = 22;
 
 /**
  * Helper method to pause the Unity player.  This is done when showing any UI.
@@ -107,7 +116,7 @@ NSMutableArray* additionalScopes = nil;
            withError:(NSError *)_error {
   if (_error == nil) {
     if (currentResult_) {
-      currentResult_->result_code = kStatusCodeSuccess;
+      currentResult_->result_code = g_StatusCode_SUCCESS;
       currentResult_->finished = true;
     } else {
       NSLog(@"No currentResult to set status on!");
@@ -118,21 +127,30 @@ NSMutableArray* additionalScopes = nil;
     if (currentResult_) {
       switch (_error.code) {
       case kGIDSignInErrorCodeUnknown:
-        currentResult_->result_code = kStatusCodeError;
+        currentResult_->result_code = g_StatusCode_INTERNAL_ERROR;
         break;
       case kGIDSignInErrorCodeKeychain:
-        currentResult_->result_code = kStatusCodeInternalError;
+        currentResult_->result_code = g_StatusCode_SERVICE_INVALID;
         break;
       case kGIDSignInErrorCodeHasNoAuthInKeychain:
-        currentResult_->result_code = kStatusCodeError;
+        currentResult_->result_code = g_StatusCode_SIGN_IN_REQUIRED;
         break;
       case kGIDSignInErrorCodeCanceled:
-        currentResult_->result_code = kStatusCodeCanceled;
+        currentResult_->result_code = g_StatusCode_CANCELED;
+        break;
+      case kGIDSignInErrorCodeEMM:
+        currentResult_->result_code = g_StatusCode_API_NOT_CONNECTED;
+        break;
+      case kGIDSignInErrorCodeScopesAlreadyGranted:
+        currentResult_->result_code = g_StatusCode_RESOLUTION_REQUIRED;
+        break;
+      case kGIDSignInErrorCodeMismatchWithCurrentUser:
+        currentResult_->result_code = g_StatusCode_INVALID_ACCOUNT;
         break;
       default:
         NSLog(@"Unmapped error code: %ld, returning Error",
               static_cast<long>(_error.code));
-        currentResult_->result_code = kStatusCodeError;
+        currentResult_->result_code = g_StatusCode_ERROR;
       }
 
       currentResult_->finished = true;
@@ -217,7 +235,7 @@ static SignInResult *startSignIn() {
   [resultLock lock];
   if (!currentResult_ || currentResult_->finished) {
     currentResult_.reset(new SignInResult());
-    currentResult_->result_code = 0;
+    currentResult_->result_code = g_StatusCode_NETWORK_ERROR;
     currentResult_->finished = false;
   } else {
     busy = true;
@@ -228,7 +246,7 @@ static SignInResult *startSignIn() {
     NSLog(@"ERROR: There is already a pending sign-in operation.");
     // Returned to the caller, should be deleted by calling
     // GoogleSignIn_DisposeFuture().
-    return new SignInResult{.result_code = kStatusCodeDeveloperError,
+    return new SignInResult{.result_code = g_StatusCode_DEVELOPER_ERROR,
                             .finished = true};
   }
   return nullptr;
@@ -299,7 +317,7 @@ int GoogleSignIn_Status(SignInResult *result) {
   if (result) {
     return result->result_code;
   }
-  return kStatusCodeDeveloperError;
+  return g_StatusCode_DEAD_CLIENT;
 }
 
 void GoogleSignIn_DisposeFuture(SignInResult *result) {
