@@ -13,7 +13,8 @@
  * limitations under the License.
  */
 apply plugin: 'com.android.library'
-apply plugin: 'maven'
+//apply plugin: 'maven'
+//apply plugin: 'maven-publish'
 
 group "com.google.signin"
 
@@ -32,17 +33,19 @@ if (project.hasProperty("uploadDir")) {
 project.ext.baseName = "google-signin-support"
 
 android {
-    compileSdkVersion 26
+    compileSdk 35
     defaultConfig {
-        minSdkVersion 14
-        targetSdkVersion 26
+        minSdk 14
+        targetSdk 35
         versionName project.version
         archivesBaseName = project.ext.baseName
         externalNativeBuild {
             cmake {
                 cppFlags "-std=c++11", "-Wall"
+                arguments "-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-z,max-page-size=16384"
             }
         }
+        ndkVersion "21.3.6528147"
         ndk {
             abiFilters 'x86', 'x86_64', 'armeabi-v7a', 'arm64-v8a'
         }
@@ -96,20 +99,20 @@ task renameLibrary() {
   }
 }
 
-uploadArchives {
-  dependsOn renameLibrary
-  repositories {
-    mavenDeployer {
-      repository(url: uri(project.ext.uploadDir))
+// uploadArchives {
+//   dependsOn renameLibrary
+//   repositories {
+//     mavenDeployer {
+//       repository(url: uri(project.ext.uploadDir))
 
-      // Remove the dependencies from the pom file to simplify the
-      // the resolution process.
-      pom.whenConfigured {
-        p -> p.dependencies = []
-      }
-    }
-  }
-}
+//       // Remove the dependencies from the pom file to simplify the
+//       // the resolution process.
+//       pom.whenConfigured {
+//         p -> p.dependencies = []
+//       }
+//     }
+//   }
+// }
 
 dependencies {
         api "com.google.android.gms:play-services-auth:21.4.0"

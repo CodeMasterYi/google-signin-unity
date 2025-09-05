@@ -31,3 +31,4 @@ staging/native/google-signin-cpp
 # don't check in iOS pod generated content
 contents.xcworkspacedata
 staging/native/testapp/testapp.xcodeproj/project.xcworkspace/xcuserdata
+/native-googlesignin/.cxx
