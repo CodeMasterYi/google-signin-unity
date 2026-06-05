@@ -15,6 +15,8 @@
  */
 #import <GoogleSignIn/GIDSignIn.h>
 #import <GoogleSignIn/GIDConfiguration.h>
+#import <GoogleSignIn/GIDGoogleUser.h>
+#import <GoogleSignIn/GIDSignInResult.h>
 
 @interface GoogleSignInHandler : NSObject
 {
@@ -30,10 +32,10 @@
 
 @property(class, nonatomic, readonly) GoogleSignInHandler *sharedInstance;
 
-- (void)signIn:(GIDSignIn *)signIn dismissViewController:(UIViewController *)viewController;
+- (void)completeSignInWithResult:(GIDSignInResult *)signInResult error:(NSError *)error;
 
-- (void)signIn:(GIDSignIn *)signIn didSignInForUser:(GIDGoogleUser *)user withError:(NSError *)_error;
+- (void)completeSignInWithUser:(GIDGoogleUser *)user error:(NSError *)error;
 
-- (void)signIn:(GIDSignIn *)signIn didDisconnectWithUser:(GIDGoogleUser *)user withError:(NSError *)_error;
+- (void)completeDisconnectWithError:(NSError *)error;
 
 @end

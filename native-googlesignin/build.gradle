@@ -13,14 +13,14 @@
  * limitations under the License.
  */
 apply plugin: 'com.android.library'
-apply plugin: 'maven'
+apply plugin: 'maven-publish'
 
-group "com.google.signin"
+group = "com.google.signin"
 
 if (project.hasProperty("pluginVersion")) {
   project.version = project.pluginVersion
 } else {
-  project.version '0-SNAPSHOT'
+  project.version = '0-SNAPSHOT'
 }
 
 if (project.hasProperty("uploadDir")) {
@@ -32,10 +32,11 @@ if (project.hasProperty("uploadDir")) {
 project.ext.baseName = "google-signin-support"
 
 android {
-    compileSdkVersion 26
+    namespace "com.google.nativelib.googlesignin"
+    compileSdk 35
     defaultConfig {
-        minSdkVersion 14
-        targetSdkVersion 26
+        minSdk 23
+        targetSdk 35
         versionName project.version
         archivesBaseName = project.ext.baseName
         externalNativeBuild {
@@ -48,10 +49,11 @@ android {
             abiFilters 'x86', 'x86_64', 'armeabi-v7a', 'arm64-v8a'
         }
     }
-    lintOptions {
-        abortOnError (project.hasProperty("lintAbortOnError") &&
-                      (project.lintAbortOnError == "" ||
-                       project.lintAbortOnError.toBoolean()))
+    ndkVersion "29.0.14206865"
+    lint {
+        abortOnError = (project.hasProperty("lintAbortOnError") &&
+                        (project.lintAbortOnError == "" ||
+                         project.lintAbortOnError.toBoolean()))
     }
     buildTypes {
         release {
@@ -74,44 +76,49 @@ android {
 // This is done in 2 parts, first declare the .srcaar as an
 // artifact, the second is a task to rename the aar -> srcaar.
 
-artifacts {
-    archives file("build/${baseName}-${version}.srcaar")
+tasks.register("renameLibrary", Copy) {
+  dependsOn "assembleRelease"
+  from "${buildDir}/outputs/aar/${baseName}-release.aar"
+  into "${buildDir}"
+  rename {
+    String fn ->
+      return fn.replace("release.aar", "${version}.srcaar")
+  }
 }
 
-task renameLibrary() {
-  doFirst {
-    copy {
-      from "${buildDir}/outputs/aar/${baseName}-release.aar"
-     into "${buildDir}"
-      rename {
-        String fn ->
-          return fn.replace("release.aar", "${version}.srcaar")
+publishing {
+  publications {
+    srcaar(MavenPublication) {
+      groupId = project.group
+      artifactId = project.ext.baseName
+      version = project.version
+      artifact(file("build/${baseName}-${version}.srcaar")) {
+        extension "srcaar"
+        builtBy tasks.named("renameLibrary")
+      }
+
+      pom.withXml {
+        def dependenciesNode = asNode().get("dependencies")
+        dependenciesNode*.replaceNode {}
       }
     }
   }
-
-  doLast {
-    configurations.archives.with   {
-         artifacts.remove artifacts.find { it.extension == "aar"}
-      }
-  }
-}
-
-uploadArchives {
-  dependsOn renameLibrary
   repositories {
-    mavenDeployer {
-      repository(url: uri(project.ext.uploadDir))
-
-      // Remove the dependencies from the pom file to simplify the
-      // the resolution process.
-      pom.whenConfigured {
-        p -> p.dependencies = []
-      }
+    maven {
+      name = "UnityLocal"
+      url = uri(project.ext.uploadDir)
     }
   }
+}
+
+tasks.register("uploadArchives") {
+  dependsOn tasks.named("publishSrcaarPublicationToUnityLocalRepository")
 }
 
 dependencies {
-        api "com.google.android.gms:play-services-auth:21.4.0"
+    api "com.google.android.gms:play-services-auth:21.6.0"
+    api "androidx.credentials:credentials:1.6.0"
+    api "androidx.credentials:credentials-play-services-auth:1.6.0"
+    api "com.google.android.libraries.identity.googleid:googleid:1.2.0"
+    implementation "androidx.annotation:annotation:1.9.1"
 }
