@@ -79,7 +79,7 @@ project.ext {
     pluginSrcPath = file('GoogleSignInPlugin').absolutePath
     pluginProjectPath = file('build/GoogleSignInPlugin').absolutePath
 
-    resolverDir = new File('build/jarresolver').absolutePath
+    resolverDir = file('build/jarresolver').absolutePath
     jarresolver_uri = System.getProperty("RESOLVER_PACKAGE_URI")
     jarresolver_repos = [
       'https://github.com/googlesamples/unity-jar-resolver.git'
@@ -95,13 +95,34 @@ task clean(type: Delete) {
 }
 
 task copy_unity_project() {
-    dependsOn ':native-googlesignin:uploadArchives'
     doFirst {
+        delete pluginProjectPath
         copy {
             from pluginSrcPath
             into pluginProjectPath
+            exclude "Assets/Parse/**"
+            exclude "Assets/Parse.meta"
         }
+        mkdir("${pluginProjectPath}/Packages")
+        file("${pluginProjectPath}/Packages/manifest.json").text =
+'''{
+  "dependencies": {
+    "com.unity.ugui": "1.0.0",
+    "com.unity.modules.androidjni": "1.0.0",
+    "com.unity.modules.imgui": "1.0.0",
+    "com.unity.modules.jsonserialize": "1.0.0",
+    "com.unity.modules.ui": "1.0.0",
+    "com.unity.modules.unitywebrequest": "1.0.0"
+  }
+}
+'''
     }
+}
+
+project(':native-googlesignin').tasks.matching {
+    it.name == 'uploadArchives'
+}.configureEach {
+    mustRunAfter rootProject.tasks.named('copy_unity_project')
 }
 
 task copy_jarresolver() {
@@ -146,15 +167,34 @@ task copy_jarresolver() {
     }
 }
 
+def jarResolverPackageFile = {
+    def directPackage = file("${resolverDir}/resolver.unitypackage")
+    if (directPackage.exists()) {
+        return directPackage
+    }
+
+    def latestPackage =
+            file("${resolverDir}/external-dependency-manager-latest.unitypackage")
+    if (latestPackage.exists()) {
+        return latestPackage
+    }
+
+    def packages = fileTree(resolverDir) {
+        include "external-dependency-manager-*.unitypackage"
+        exclude "**/test_data/**"
+    }.files.sort { it.name }
+    if (packages.isEmpty()) {
+        throw new GradleException("No jar resolver unitypackage found in ${resolverDir}")
+    }
+    return packages.last()
+}
+
 task import_jarresolver() {
     description = "Imports the jar resolver into the project"
     dependsOn copy_unity_project, copy_jarresolver
 
     doLast {
-        def tree = fileTree(resolverDir) {
-            include "*.unitypackage"
-        }
-        def jarresolver_package = tree.getSingleFile()
+        def jarresolver_package = jarResolverPackageFile()
         def argv = [
                 "-gvh_disable",
                 "-g.building",
@@ -184,7 +224,7 @@ task import_jarresolver() {
 
 task generate_dependency_xml() {
   description "Generate the JarResolver dependency file for the support library"
-  dependsOn copy_unity_project
+  dependsOn copy_unity_project, ':native-googlesignin:uploadArchives'
   doFirst {
     def xmlFile = file("${pluginProjectPath}/${editorDir}/GoogleSignInSupportDependencies.xml")
 
@@ -241,10 +281,7 @@ task package_plugin () {
     dependsOn generate_manifest, copy_manifestMetadata
 
     doLast {
-        def tree = fileTree(resolverDir) {
-            include "*.unitypackage"
-        }
-        def jarresolver_package = tree.getSingleFile()
+        def jarresolver_package = jarResolverPackageFile()
         def argv = [
                 "-gvh_disable",
                 "-g.building",
@@ -257,7 +294,6 @@ task package_plugin () {
                 "-importPackage", jarresolver_package,
                 "-exportPackage",
                     "Assets/GoogleSignIn",
-                    "Assets/Parse",
                     "Assets/PlayServicesResolver",
                     "Assets/Plugins",
                 "${exportPath}",
