@@ -76,13 +76,22 @@ android {
 // This is done in 2 parts, first declare the .srcaar as an
 // artifact, the second is a task to rename the aar -> srcaar.
 
-tasks.register("renameLibrary", Copy) {
+tasks.register("renameLibrary") {
   dependsOn "assembleRelease"
-  from "${buildDir}/outputs/aar/${baseName}-release.aar"
-  into "${buildDir}"
-  rename {
-    String fn ->
-      return fn.replace("release.aar", "${version}.srcaar")
+  def releaseAar = layout.buildDirectory.file("outputs/aar/${baseName}-release.aar")
+  def srcaar = layout.buildDirectory.file("${baseName}-${version}.srcaar")
+  inputs.file(releaseAar)
+  outputs.file(srcaar)
+
+  doLast {
+    copy {
+      from releaseAar
+      into layout.buildDirectory
+      rename {
+        String fn ->
+          return fn.replace("release.aar", "${version}.srcaar")
+      }
+    }
   }
 }
 
