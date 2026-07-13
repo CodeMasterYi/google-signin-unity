@@ -78,6 +78,12 @@ project.ext {
     samplePath = file('GoogleSignIn-sample.unitypackage').absolutePath
     pluginSrcPath = file('GoogleSignInPlugin').absolutePath
     pluginProjectPath = file('build/GoogleSignInPlugin').absolutePath
+    pluginExportPaths = [
+        "Assets/GoogleSignIn",
+        "Assets/ExternalDependencyManager",
+        "Assets/PlayServicesResolver",
+        "Assets/Plugins"
+    ]
 
     resolverDir = file('build/jarresolver').absolutePath
     jarresolver_uri = System.getProperty("RESOLVER_PACKAGE_URI")
@@ -247,12 +253,20 @@ task generate_manifest(dependsOn: [ 'inject_versionIntoMetaFiles']) {
   description 'Generate a manifest for the files in the plug-in.'
   doLast {
     def dir = file("${pluginProjectPath}/Assets")
+    def pluginRootPath = file(pluginProjectPath).toPath().toAbsolutePath().normalize()
+    def exportedRootPaths = pluginExportPaths.collect {
+      file("${pluginProjectPath}/${it}").toPath().toAbsolutePath().normalize()
+    }
     def list = []
     dir.eachFileRecurse(groovy.io.FileType.FILES) { filename ->
-      def path = filename.path
-      if (!(path.toLowerCase().endsWith('.meta') ||
-            path.toLowerCase().endsWith('.txt'))) {
-        list << filename.path.replace("${pluginProjectPath}/", '')
+      def path = filename.toPath().toAbsolutePath().normalize()
+      def relativePath = pluginRootPath.relativize(path).toString().replace(File.separatorChar, '/' as char)
+      def lowerPath = relativePath.toLowerCase()
+      if (exportedRootPaths.any { path.startsWith(it) } &&
+          !(lowerPath.endsWith('.meta') ||
+            lowerPath.startsWith("${editorDir.toLowerCase()}/${currentPluginBasename}_v") &&
+            lowerPath.endsWith('.txt'))) {
+        list << relativePath
       }
     }
   def manifest = file("${pluginProjectPath}/${editorDir}/" +
@@ -292,13 +306,9 @@ task package_plugin () {
                 "-projectPath", pluginProjectPath,
                 "-logFile", "build/unity.log",
                 "-importPackage", jarresolver_package,
-                "-exportPackage",
-                    "Assets/GoogleSignIn",
-                    "Assets/PlayServicesResolver",
-                    "Assets/Plugins",
+                "-exportPackage"] + pluginExportPaths + [
                 "${exportPath}",
-                "-quit"
-        ]
+                "-quit"]
 
         ext.execResult = exec {
             executable "${unity_exe}"

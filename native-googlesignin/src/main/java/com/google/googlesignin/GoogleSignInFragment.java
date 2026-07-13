@@ -15,12 +15,13 @@
  */
 package com.google.googlesignin;
 
+import android.accounts.Account;
 import android.app.Activity;
 import android.app.Fragment;
 import android.app.FragmentTransaction;
 import android.content.Intent;
-import android.os.Build;
 import android.os.Bundle;
+import android.os.CancellationSignal;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.View;
@@ -42,19 +43,30 @@ import com.google.android.gms.auth.api.signin.GoogleSignInAccount;
 import com.google.android.gms.auth.api.signin.GoogleSignInOptions;
 import com.google.android.gms.auth.api.signin.GoogleSignInOptionsExtension;
 import com.google.android.gms.auth.api.signin.GoogleSignInResult;
+import com.google.android.gms.auth.api.identity.Identity;
+import com.google.android.gms.auth.api.identity.RevokeAccessRequest;
 import com.google.android.gms.common.ConnectionResult;
 import com.google.android.gms.common.api.Api;
 import com.google.android.gms.common.api.CommonStatusCodes;
 import com.google.android.gms.common.api.GoogleApiClient;
 import com.google.android.gms.common.api.ResultCallback;
 import com.google.android.gms.common.api.Scope;
+import com.google.android.gms.common.api.Status;
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption;
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption;
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential;
+import com.google.android.gms.tasks.OnCompleteListener;
+import com.google.android.gms.tasks.Task;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.Executor;
 
 /**
@@ -66,7 +78,11 @@ public class GoogleSignInFragment extends Fragment
 
   // Tag uniquely identifying this fragment.
   public static final String FRAGMENT_TAG = "signin.SignInFragment";
-  private static final int RC_SIGNIN = 9009;
+  private static final int FIRST_SIGN_IN_REQUEST_CODE = 9009;
+  private static final int LAST_SIGN_IN_REQUEST_CODE = 0xFFFF;
+  private static final String GOOGLE_ACCOUNT_TYPE = "com.google";
+  private static final List<Scope> BASIC_IDENTITY_SCOPES =
+      Arrays.asList(new Scope("openid"), new Scope("profile"), new Scope("email"));
 
   private final Handler mainHandler = new Handler(Looper.getMainLooper());
   private final Executor mainExecutor =
@@ -85,17 +101,20 @@ public class GoogleSignInFragment extends Fragment
   @Override
   public void onConnected(@Nullable Bundle connectionHint) {
     GoogleSignInHelper.logDebug("onConnected!");
-    if (request == null) {
-      GoogleSignInHelper.logError("Connected with no pending request.");
+    TokenRequest pendingRequest = legacyClientRequest;
+    if (!isCurrentRequest(pendingRequest)) {
+      GoogleSignInHelper.logDebug("Ignoring connection for a stale request.");
+      return;
+    }
+    if (legacyOperationRequest == pendingRequest) {
       return;
     }
 
     if (mGoogleApiClient.hasConnectedApi(Auth.GOOGLE_SIGN_IN_API)) {
       GoogleSignInHelper.logDebug("has connected auth!");
-      legacySilentSignIn();
+      legacySilentSignIn(pendingRequest);
     } else {
-      Intent signInIntent = Auth.GoogleSignInApi.getSignInIntent(mGoogleApiClient);
-      startActivityForResult(signInIntent, RC_SIGNIN);
+      startLegacySignInActivity(pendingRequest);
     }
   }
 
@@ -107,25 +126,78 @@ public class GoogleSignInFragment extends Fragment
   @Override
   public void onConnectionFailed(@NonNull ConnectionResult connectionResult) {
     GoogleSignInHelper.logError("Connection failed: " + connectionResult.getErrorCode());
+    TokenRequest pendingRequest = legacyClientRequest;
+    if (!isCurrentRequest(pendingRequest)) {
+      GoogleSignInHelper.logDebug("Ignoring connection failure for a stale request.");
+      return;
+    }
     if (connectionResult.hasResolution()) {
-      Intent signInIntent = Auth.GoogleSignInApi.getSignInIntent(mGoogleApiClient);
-      startActivityForResult(signInIntent, RC_SIGNIN);
+      if (legacyOperationRequest != pendingRequest) {
+        startLegacySignInActivity(pendingRequest);
+      }
     } else {
-      finishRequest(connectionResult.getErrorCode(), null);
+      finishRequest(pendingRequest, connectionResult.getErrorCode(), null);
     }
   }
 
   public void disconnect() {
+    final Activity activity = getActivity();
+    final Account accountToRevoke = lastSignedInAccount;
+    final List<Scope> scopesToRevoke = new ArrayList<>(lastGrantedScopes);
+    final GoogleApiClient legacyClient = mGoogleApiClient;
+
     clearRequest(true);
     clearCredentialManagerState();
+    lastSignedInAccount = null;
+    lastGrantedScopes.clear();
+    mGoogleApiClient = null;
+    legacyClientRequest = null;
+    legacyOperationRequest = null;
 
-    if (mGoogleApiClient != null) {
+    if (accountToRevoke != null && activity != null && !scopesToRevoke.isEmpty()) {
       try {
-        Auth.GoogleSignInApi.revokeAccess(mGoogleApiClient);
+        RevokeAccessRequest revokeRequest =
+            RevokeAccessRequest.builder()
+                .setAccount(accountToRevoke)
+                .setScopes(scopesToRevoke)
+                .build();
+        Identity.getAuthorizationClient(activity)
+            .revokeAccess(revokeRequest)
+            .addOnCompleteListener(
+                new OnCompleteListener<Void>() {
+                  @Override
+                  public void onComplete(@NonNull Task<Void> task) {
+                    if (task.isSuccessful()) {
+                      GoogleSignInHelper.logDebug("Google account access revoked.");
+                    } else {
+                      GoogleSignInHelper.logError(
+                          "Failed to revoke Google account access: " + task.getException());
+                    }
+                  }
+                });
+      } catch (Throwable throwable) {
+        GoogleSignInHelper.logError("Failed to start access revocation: " + throwable.getMessage());
+      }
+      if (legacyClient != null) {
+        legacyClient.disconnect();
+      }
+    } else if (legacyClient != null) {
+      try {
+        Auth.GoogleSignInApi.revokeAccess(legacyClient)
+            .setResultCallback(
+                new ResultCallback<Status>() {
+                  @Override
+                  public void onResult(@NonNull Status status) {
+                    if (!status.isSuccess()) {
+                      GoogleSignInHelper.logError("Failed to revoke legacy access: " + status);
+                    }
+                    legacyClient.disconnect();
+                  }
+                });
       } catch (Throwable throwable) {
         GoogleSignInHelper.logError("Failed to revoke legacy access: " + throwable.getMessage());
+        legacyClient.disconnect();
       }
-      mGoogleApiClient.disconnect();
     }
   }
 
@@ -141,7 +213,7 @@ public class GoogleSignInFragment extends Fragment
     BUSY
   }
 
-  private State state;
+  private State state = State.NEW;
 
   /**
    * The request to sign-in. This contains the configuration for the API client/Sign-in options and
@@ -151,6 +223,13 @@ public class GoogleSignInFragment extends Fragment
 
   private GoogleApiClient mGoogleApiClient;
   private CredentialManager credentialManager;
+  private CancellationSignal credentialCancellationSignal;
+  private TokenRequest legacyClientRequest;
+  private TokenRequest legacyOperationRequest;
+  private final Map<Integer, TokenRequest> legacyActivityRequests = new HashMap<>();
+  private int nextSignInRequestCode = FIRST_SIGN_IN_REQUEST_CODE;
+  private Account lastSignedInAccount;
+  private final List<Scope> lastGrantedScopes = new ArrayList<>();
 
   // TODO: make config async.
   private static GoogleSignInFragment theFragment;
@@ -276,15 +355,16 @@ public class GoogleSignInFragment extends Fragment
    * fallback.
    */
   private void processRequest(final boolean silent) {
-    try {
-      if (request != null) {
-        setState(State.BUSY);
-      } else {
-        GoogleSignInHelper.logInfo("No pending configuration, returning");
-        return;
-      }
+    final TokenRequest pendingRequest = request;
+    if (pendingRequest == null) {
+      GoogleSignInHelper.logInfo("No pending configuration, returning");
+      return;
+    }
 
-      request
+    try {
+      setState(State.BUSY);
+
+      pendingRequest
           .getPendingResponse()
           .setResultCallback(
               new ResultCallback<TokenResult>() {
@@ -301,30 +381,30 @@ public class GoogleSignInFragment extends Fragment
                       tokenResult.getHandle(),
                       tokenResult.getStatus().getStatusCode(),
                       tokenResult.getAccount());
-                  clearRequest(false);
+                  clearRequest(pendingRequest, false);
                 }
               });
 
-      if (startCredentialManagerRequest(silent)) {
+      if (startCredentialManagerRequest(pendingRequest, silent)) {
         GoogleSignInHelper.logDebug("Started Credential Manager sign-in.");
         return;
       }
 
-      startLegacyRequest(silent);
+      startLegacyRequest(pendingRequest, silent);
     } catch (Throwable throwable) {
       GoogleSignInHelper.logError("Exception caught! " + throwable.getMessage());
-      finishRequest(CommonStatusCodes.INTERNAL_ERROR, null);
+      finishRequest(pendingRequest, CommonStatusCodes.INTERNAL_ERROR, null);
     }
 
     GoogleSignInHelper.logDebug("Done with processRequest!");
   }
 
-  private boolean startCredentialManagerRequest(final boolean silent) {
+  private boolean startCredentialManagerRequest(
+      final TokenRequest pendingRequest, final boolean silent) {
     final Activity activity = getActivity();
     if (activity == null
-        || request == null
-        || !request.canUseCredentialManager()
-        || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+        || !isCurrentRequest(pendingRequest)
+        || !pendingRequest.canUseCredentialManager()) {
       return false;
     }
 
@@ -338,42 +418,53 @@ public class GoogleSignInFragment extends Fragment
                 silent
                     ? new GetGoogleIdOption.Builder()
                         .setFilterByAuthorizedAccounts(true)
-                        .setServerClientId(request.getWebClientId())
+                        .setServerClientId(pendingRequest.getWebClientId())
                         .setAutoSelectEnabled(true)
                         .build()
-                    : new GetSignInWithGoogleOption.Builder(request.getWebClientId()).build())
+                    : new GetSignInWithGoogleOption.Builder(pendingRequest.getWebClientId()).build())
             .build();
 
+    final CancellationSignal cancellationSignal = new CancellationSignal();
+    credentialCancellationSignal = cancellationSignal;
     credentialManager.getCredentialAsync(
         activity,
         credentialRequest,
-        null,
+        cancellationSignal,
         mainExecutor,
         new CredentialManagerCallback<GetCredentialResponse, GetCredentialException>() {
           @Override
           public void onResult(@NonNull GetCredentialResponse result) {
-            if (!handleCredentialResult(result)) {
+            if (!isCurrentRequest(pendingRequest)) {
+              GoogleSignInHelper.logDebug("Ignoring stale Credential Manager result.");
+              return;
+            }
+            if (!handleCredentialResult(pendingRequest, result)) {
               GoogleSignInHelper.logError("Unexpected Credential Manager response, using legacy.");
-              fallbackToLegacy(silent, CommonStatusCodes.ERROR);
+              fallbackToLegacy(pendingRequest, silent, CommonStatusCodes.ERROR);
             }
           }
 
           @Override
           public void onError(@NonNull GetCredentialException e) {
+            if (!isCurrentRequest(pendingRequest)) {
+              GoogleSignInHelper.logDebug("Ignoring stale Credential Manager error.");
+              return;
+            }
             if (e instanceof GetCredentialCancellationException) {
-              finishRequest(CommonStatusCodes.CANCELED, null);
+              finishRequest(pendingRequest, CommonStatusCodes.CANCELED, null);
               return;
             }
 
             GoogleSignInHelper.logError(
                 "Credential Manager failed, using legacy: " + e.getMessage());
-            fallbackToLegacy(silent, mapCredentialException(e));
+            fallbackToLegacy(pendingRequest, silent, mapCredentialException(e));
           }
         });
     return true;
   }
 
-  private boolean handleCredentialResult(GetCredentialResponse result) {
+  private boolean handleCredentialResult(
+      TokenRequest pendingRequest, GetCredentialResponse result) {
     Credential credential = result.getCredential();
     if (!(credential instanceof CustomCredential)) {
       return false;
@@ -389,7 +480,10 @@ public class GoogleSignInFragment extends Fragment
     try {
       GoogleIdTokenCredential googleCredential =
           GoogleIdTokenCredential.createFrom(customCredential.getData());
+      rememberSignedInAccount(
+          new Account(googleCredential.getEmail(), GOOGLE_ACCOUNT_TYPE), BASIC_IDENTITY_SCOPES);
       finishRequest(
+          pendingRequest,
           CommonStatusCodes.SUCCESS,
           GoogleSignInUserData.fromGoogleIdTokenCredential(googleCredential));
       return true;
@@ -399,15 +493,16 @@ public class GoogleSignInFragment extends Fragment
     }
   }
 
-  private void fallbackToLegacy(boolean silent, int fallbackStatus) {
-    if (request == null) {
+  private void fallbackToLegacy(
+      TokenRequest pendingRequest, boolean silent, int fallbackStatus) {
+    if (!isCurrentRequest(pendingRequest)) {
       return;
     }
     try {
-      startLegacyRequest(silent);
+      startLegacyRequest(pendingRequest, silent);
     } catch (Throwable throwable) {
       GoogleSignInHelper.logError("Legacy Google Sign-In fallback failed: " + throwable);
-      finishRequest(fallbackStatus, null);
+      finishRequest(pendingRequest, fallbackStatus, null);
     }
   }
 
@@ -421,8 +516,11 @@ public class GoogleSignInFragment extends Fragment
     return CommonStatusCodes.ERROR;
   }
 
-  private void startLegacyRequest(final boolean silent) {
-    buildClient(request);
+  private void startLegacyRequest(final TokenRequest pendingRequest, final boolean silent) {
+    if (!isCurrentRequest(pendingRequest)) {
+      return;
+    }
+    buildClient(pendingRequest);
     if (mGoogleApiClient == null) {
       return;
     }
@@ -430,60 +528,116 @@ public class GoogleSignInFragment extends Fragment
     GoogleSignInHelper.logDebug(
         " Has connected == " + mGoogleApiClient.hasConnectedApi(Auth.GOOGLE_SIGN_IN_API));
     if (mGoogleApiClient.hasConnectedApi(Auth.GOOGLE_SIGN_IN_API)) {
-      legacySilentSignIn();
+      legacySilentSignIn(pendingRequest);
     } else if (!silent) {
-      Intent signInIntent = Auth.GoogleSignInApi.getSignInIntent(mGoogleApiClient);
-      startActivityForResult(signInIntent, RC_SIGNIN);
+      startLegacySignInActivity(pendingRequest);
     } else {
-      legacySilentSignIn();
+      legacySilentSignIn(pendingRequest);
     }
   }
 
-  private void legacySilentSignIn() {
+  private void startLegacySignInActivity(TokenRequest pendingRequest) {
+    if (!isCurrentRequest(pendingRequest) || mGoogleApiClient == null) {
+      return;
+    }
+
+    legacyOperationRequest = pendingRequest;
+    int requestCode = registerLegacyActivityRequest(pendingRequest);
+    Intent signInIntent = Auth.GoogleSignInApi.getSignInIntent(mGoogleApiClient);
+    startActivityForResult(signInIntent, requestCode);
+  }
+
+  private synchronized int registerLegacyActivityRequest(TokenRequest pendingRequest) {
+    int initialCode = nextSignInRequestCode;
+    do {
+      int requestCode = nextSignInRequestCode;
+      nextSignInRequestCode =
+          requestCode == LAST_SIGN_IN_REQUEST_CODE
+              ? FIRST_SIGN_IN_REQUEST_CODE
+              : requestCode + 1;
+      if (!legacyActivityRequests.containsKey(requestCode)) {
+        legacyActivityRequests.put(requestCode, pendingRequest);
+        return requestCode;
+      }
+    } while (nextSignInRequestCode != initialCode);
+
+    throw new IllegalStateException("No request code is available for Google Sign-In.");
+  }
+
+  @Nullable
+  private synchronized TokenRequest takeLegacyActivityRequest(int requestCode) {
+    return legacyActivityRequests.remove(requestCode);
+  }
+
+  private void legacySilentSignIn(final TokenRequest pendingRequest) {
+    if (!isCurrentRequest(pendingRequest)) {
+      return;
+    }
+    legacyOperationRequest = pendingRequest;
     Auth.GoogleSignInApi.silentSignIn(mGoogleApiClient)
         .setResultCallback(
             new ResultCallback<GoogleSignInResult>() {
               @Override
               public void onResult(@NonNull GoogleSignInResult googleSignInResult) {
+                if (!isCurrentRequest(pendingRequest)) {
+                  GoogleSignInHelper.logDebug("Ignoring stale legacy silent result.");
+                  return;
+                }
                 if (!googleSignInResult.isSuccess()) {
                   GoogleSignInHelper.logError(
                       "Error with silentSignIn: " + googleSignInResult.getStatus());
                 }
-                finishLegacyResult(googleSignInResult);
+                finishLegacyResult(pendingRequest, googleSignInResult);
               }
             });
   }
 
-  private void finishLegacyResult(@Nullable GoogleSignInResult result) {
+  private void finishLegacyResult(
+      TokenRequest pendingRequest, @Nullable GoogleSignInResult result) {
     if (result == null) {
-      finishRequest(CommonStatusCodes.ERROR, null);
+      finishRequest(pendingRequest, CommonStatusCodes.ERROR, null);
       return;
     }
 
     GoogleSignInAccount acct = result.getSignInAccount();
+    if (acct != null) {
+      Account account = acct.getAccount();
+      if (account == null && acct.getEmail() != null) {
+        account = new Account(acct.getEmail(), GOOGLE_ACCOUNT_TYPE);
+      }
+      rememberSignedInAccount(account, acct.getGrantedScopes());
+    }
     finishRequest(
+        pendingRequest,
         result.getStatus().getStatusCode(),
         GoogleSignInUserData.fromGoogleSignInAccount(acct));
   }
 
-  private void finishRequest(int status, @Nullable GoogleSignInUserData account) {
-    TokenRequest currentRequest = request;
-    if (currentRequest != null) {
-      currentRequest.setResult(status, account);
-    } else {
-      GoogleSignInHelper.logError("Pending request is null, can't return result!");
+  private void finishRequest(
+      TokenRequest pendingRequest, int status, @Nullable GoogleSignInUserData account) {
+    if (!isCurrentRequest(pendingRequest)) {
+      GoogleSignInHelper.logDebug("Ignoring result for a stale request.");
+      return;
     }
+    pendingRequest.setResult(status, account);
   }
 
   /**
    * Builds the Google API Client based on the configuration in the request.
    *
-   * @param request - the request for a token.
+   * @param pendingRequest - the request for a token.
    */
-  private void buildClient(TokenRequest request) {
+  private void buildClient(TokenRequest pendingRequest) {
+    if (mGoogleApiClient != null) {
+      mGoogleApiClient.disconnect();
+    }
+    mGoogleApiClient = null;
+    legacyClientRequest = pendingRequest;
+    legacyOperationRequest = null;
+
     GoogleSignInOptions.Builder builder;
 
-    if (request.getUseGamesConfig()) {
+    if (pendingRequest.getUseGamesConfig()) {
       GoogleSignInHelper.logDebug("Using DEFAULT_GAMES_SIGN_IN");
       builder = new GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_GAMES_SIGN_IN);
     } else {
@@ -491,72 +645,75 @@ public class GoogleSignInFragment extends Fragment
       builder = new GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN);
     }
 
-    if (request.getDoAuthCode()) {
-      if (!request.getWebClientId().isEmpty()) {
+    if (pendingRequest.getDoAuthCode()) {
+      if (!pendingRequest.getWebClientId().isEmpty()) {
         GoogleSignInHelper.logDebug(
             "Requesting AuthCode force = "
-                + request.getForceRefresh()
+                + pendingRequest.getForceRefresh()
                 + "client: "
-                + request.getWebClientId());
-        builder.requestServerAuthCode(request.getWebClientId(), request.getForceRefresh());
+                + pendingRequest.getWebClientId());
+        builder.requestServerAuthCode(
+            pendingRequest.getWebClientId(), pendingRequest.getForceRefresh());
       } else {
         GoogleSignInHelper.logError("Web client ID is needed for Auth Code");
-        finishRequest(CommonStatusCodes.DEVELOPER_ERROR, null);
+        finishRequest(pendingRequest, CommonStatusCodes.DEVELOPER_ERROR, null);
         throw new IllegalStateException("Web client ID is needed for Auth Code");
       }
     }
 
-    if (request.getDoEmail()) {
+    if (pendingRequest.getDoEmail()) {
       GoogleSignInHelper.logDebug("Requesting email");
       builder.requestEmail();
     }
 
-    if (request.getDoIdToken()) {
-      if (!request.getWebClientId().isEmpty()) {
-        GoogleSignInHelper.logDebug("Requesting IDToken  client: " + request.getWebClientId());
+    if (pendingRequest.getDoIdToken()) {
+      if (!pendingRequest.getWebClientId().isEmpty()) {
+        GoogleSignInHelper.logDebug(
+            "Requesting IDToken  client: " + pendingRequest.getWebClientId());
 
-        builder.requestIdToken(request.getWebClientId());
+        builder.requestIdToken(pendingRequest.getWebClientId());
       } else {
         GoogleSignInHelper.logError("Web client ID is needed for ID Token");
-        finishRequest(CommonStatusCodes.DEVELOPER_ERROR, null);
+        finishRequest(pendingRequest, CommonStatusCodes.DEVELOPER_ERROR, null);
         throw new IllegalStateException("Web client ID is needed for ID Token");
       }
     }
-    if (request.getScopes() != null) {
-      for (String s : request.getScopes()) {
+    if (pendingRequest.getScopes() != null) {
+      for (String s : pendingRequest.getScopes()) {
         GoogleSignInHelper.logDebug("Adding scope: " + s);
 
         builder.requestScopes(new Scope(s));
       }
     }
 
-    if (request.getHidePopups() && request.getUseGamesConfig()) {
+    if (pendingRequest.getHidePopups() && pendingRequest.getUseGamesConfig()) {
       GoogleSignInHelper.logDebug("hiding popup views for games API");
       builder.addExtension(getGamesExtension());
     }
 
-    if (request.getAccountName() != null) {
-      GoogleSignInHelper.logDebug("Setting accountName: " + request.getAccountName());
+    if (pendingRequest.getAccountName() != null) {
+      GoogleSignInHelper.logDebug("Setting accountName: " + pendingRequest.getAccountName());
 
-      builder.setAccountName(request.getAccountName());
+      builder.setAccountName(pendingRequest.getAccountName());
     }
 
     GoogleSignInOptions options = builder.build();
 
     GoogleApiClient.Builder clientBuilder =
         new GoogleApiClient.Builder(getActivity()).addApi(Auth.GOOGLE_SIGN_IN_API, options);
-    if (request.getUseGamesConfig()) {
+    if (pendingRequest.getUseGamesConfig()) {
       GoogleSignInHelper.logDebug("Adding games API");
 
       try {
         clientBuilder.addApi(getGamesAPI());
       } catch (Exception e) {
         GoogleSignInHelper.logError("Exception getting Games API: " + e.getMessage());
-        finishRequest(CommonStatusCodes.DEVELOPER_ERROR, null);
+        legacyClientRequest = null;
+        finishRequest(pendingRequest, CommonStatusCodes.DEVELOPER_ERROR, null);
         return;
       }
     }
-    if (request.getHidePopups()) {
+    if (pendingRequest.getHidePopups()) {
       View invisible = new View(getActivity());
       invisible.setVisibility(View.INVISIBLE);
       invisible.setClickable(false);
@@ -642,9 +799,11 @@ public class GoogleSignInFragment extends Fragment
     } else if (getState() == State.PENDING_SILENT) {
       GoogleSignInHelper.logDebug("State is pending_silent, calling processRequest(true)");
       processRequest(true);
-    } else {
+    } else if (request == null) {
       GoogleSignInHelper.logDebug("State is now ready");
       setState(State.READY);
+    } else {
+      GoogleSignInHelper.logDebug("Keeping state while a sign-in request is active: " + getState());
     }
   }
 
@@ -662,18 +821,20 @@ public class GoogleSignInFragment extends Fragment
   @Override
   public void onActivityResult(int requestCode, int resultCode, Intent data) {
     GoogleSignInHelper.logDebug("onActivityResult: " + requestCode + " " + resultCode);
-    if (requestCode == RC_SIGNIN) {
+    TokenRequest pendingRequest = takeLegacyActivityRequest(requestCode);
+    if (pendingRequest != null) {
+      if (!isCurrentRequest(pendingRequest)) {
+        GoogleSignInHelper.logDebug("Ignoring stale legacy activity result.");
+        return;
+      }
+
       GoogleSignInResult result = Auth.GoogleSignInApi.getSignInResultFromIntent(data);
-      if (request != null) {
-        if (result == null) {
-          int returnCode = resultCode >= 0 ? CommonStatusCodes.ERROR : resultCode;
-          finishRequest(returnCode, null);
-          GoogleSignInHelper.logError("GoogleSignIn result is null, returning error.");
-        } else {
-          finishLegacyResult(result);
-        }
+      if (result == null) {
+        int returnCode = resultCode >= 0 ? CommonStatusCodes.ERROR : resultCode;
+        finishRequest(pendingRequest, returnCode, null);
+        GoogleSignInHelper.logError("GoogleSignIn result is null, returning error.");
       } else {
-        GoogleSignInHelper.logError("Pending request is null, can't return result!");
+        finishLegacyResult(pendingRequest, result);
       }
       return;
     }
@@ -708,11 +869,60 @@ public class GoogleSignInFragment extends Fragment
         });
   }
 
-  private synchronized void clearRequest(boolean cancel) {
-    if (cancel && request != null) {
-      request.cancel();
+  private synchronized boolean isCurrentRequest(@Nullable TokenRequest pendingRequest) {
+    return pendingRequest != null && request == pendingRequest;
+  }
+
+  private synchronized void rememberSignedInAccount(
+      @Nullable Account account, @Nullable Iterable<Scope> scopes) {
+    lastSignedInAccount = account;
+    lastGrantedScopes.clear();
+    if (scopes != null) {
+      for (Scope scope : scopes) {
+        if (scope != null && !lastGrantedScopes.contains(scope)) {
+          lastGrantedScopes.add(scope);
+        }
+      }
     }
+    if (lastGrantedScopes.isEmpty()) {
+      lastGrantedScopes.addAll(BASIC_IDENTITY_SCOPES);
+    }
+  }
+
+  private void clearRequest(boolean cancel) {
+    clearRequest(request, cancel);
+  }
+
+  private synchronized void clearRequest(
+      @Nullable TokenRequest expectedRequest, boolean cancel) {
+    if (expectedRequest == null || request != expectedRequest) {
+      return;
+    }
+
     request = null;
     setState(getActivity() != null ? State.READY : State.NEW);
+
+    CancellationSignal cancellationSignal = credentialCancellationSignal;
+    credentialCancellationSignal = null;
+    if (legacyClientRequest == expectedRequest) {
+      legacyClientRequest = null;
+    }
+    if (legacyOperationRequest == expectedRequest) {
+      legacyOperationRequest = null;
+    }
+    for (Iterator<Map.Entry<Integer, TokenRequest>> iterator =
+            legacyActivityRequests.entrySet().iterator();
+        iterator.hasNext(); ) {
+      if (iterator.next().getValue() == expectedRequest) {
+        iterator.remove();
+      }
+    }
+
+    if (cancellationSignal != null && !cancellationSignal.isCanceled()) {
+      cancellationSignal.cancel();
+    }
+    if (cancel) {
+      expectedRequest.cancel();
+    }
   }
 }

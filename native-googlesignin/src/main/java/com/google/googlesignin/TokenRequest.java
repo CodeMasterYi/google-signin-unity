@@ -139,6 +139,8 @@ public class TokenRequest {
   public boolean canUseCredentialManager() {
     return !useGamesConfig
         && !doAuthCode
+        && doEmail
+        && doIdToken
         && !forceRefresh
         && !hidePopups
         && getWebClientId().length() > 0
