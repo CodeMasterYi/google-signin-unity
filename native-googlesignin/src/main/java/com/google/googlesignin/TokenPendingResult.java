@@ -68,7 +68,7 @@ public class TokenPendingResult extends PendingResult<TokenResult> {
   @Override
   public void cancel() {
     setResult(null, CommonStatusCodes.CANCELED);
-    latch.countDown();
+    setStatus(CommonStatusCodes.CANCELED);
   }
 
   @Override
